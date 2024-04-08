@@ -1,0 +1,553 @@
+---
+title: "Paper_IV_V"
+author: "Dennis Amnebrink"
+affiliation-title: "Linnaeus University"
+title-block-banner: true
+date: now
+editor: visual
+toc: true
+prefer-html: true
+number-sections: true
+format:
+  html:
+     code-fold: true
+     self-contained: true
+---
+
+```{r libraries}
+library(tidyverse)
+library(vegan)
+library(RColorBrewer)
+library(pheatmap)
+library(Hmisc)
+library(grid)
+library(ggtext)
+library(data.table)
+library(patchwork)
+library(cowplot)
+```
+
+```{r}
+readRenviron("../global_vars.R")
+  
+TEXT_SIZE <- Sys.getenv("TEXT_SIZE")
+TEXT_SIZE1 = 10
+
+GEOM_COL_COLOURS = c(
+  RColorBrewer::brewer.pal(12, name = 'Paired')) # Setting colour scheme vector.
+
+TREAT_COLOURS <- c("blue","green3","red","yellow4")
+```
+
+# Paper 4
+```{r file_loading}
+taxonomy <- read_tsv("../data/paper_4_5/taxonomy.tsv") %>%
+  separate(Taxon, c("domain", "phylum", "class", "order","family","genus","species"), sep =";") %>%
+  replace_na(list(phylum = "Unknown", class = "Unknown", order = "Unknown", family = "Unknown", genus = "Unknown", species = "Unknown")) %>%
+  rename("Feature_ID" = "Feature ID") 
+  
+#Removing prefix in taxnomy names
+taxonomy$domain <- gsub("D_[0-9]__","", taxonomy$domain)
+taxonomy$phylum <- gsub("D_[0-9]__","", taxonomy$phylum)
+taxonomy$class <- gsub("D_[0-9]__","", taxonomy$class)
+taxonomy$order <- gsub("D_[0-9]__","", taxonomy$order)
+taxonomy$family <- gsub("D_[0-9]__","", taxonomy$family)
+taxonomy$genus <- gsub("D_[0-9]__","", taxonomy$genus)
+taxonomy$species <- gsub("D_[0-9]__","", taxonomy$species)
+
+#Filtering out chloroplasts and mitochondria
+taxonomy <- taxonomy %>% 
+            filter(order != "Chloroplast" & family != "Mitochondria") %>%
+            mutate(ASV = paste0("ASV",row_number()))
+
+
+abs_abu <- read_tsv("../data/paper_4_5/feature-table.tsv") %>%
+  gather(sample, abundance, 2:ncol(.)) %>% #Creating a long format instead of wide
+  rename("Feature_ID" = "OTU ID") %>% # Renaming
+  inner_join(taxonomy, by = "Feature_ID")  %>% #joining in taxonomic information
+  filter(order != "Chloroplast" & family != "Mitochondria") %>% 
+  select(Feature_ID, sample, abundance)
+
+#Days : 0, 3, 6, 10, 13, 17, 20, 24, 27
+sample_key <- read_tsv("../data/paper_4_5/sample_key.tsv") %>%
+  separate(replicate, c("treatment", "replicate"), sep = -1) 
+  
+sample_key$treatment <- sub(2,"", sample_key$treatment)
+
+#Reading in the file and matching the names
+mu <- read_tsv("../data/paper_4_5/mu.tsv") %>%
+  rename(timepoint = "Sampling", treatment = "Treatment", replicate = "Replicate") %>%
+  mutate(timepoint = str_replace(timepoint, "^","T"), 
+         tre_rep = paste(timepoint, treatment, replicate, sep = ""))
+
+#Respiration values and creating common variable to join in other df (tre_rep)
+Rm <- read_tsv("../data/paper_4_5/Rm_values.tsv") %>%
+   mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) 
+```
+
+## Taxonomy PCA
+```{r}
+pca <- decostand(
+as.matrix(
+  abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  #group_by(tre_rep) %>%
+  #mutate(relab = abundance/sum(abundance)) %>% #Relative abundance not used due to hellinger.
+  #ungroup() %>%
+  select(Feature_ID, tre_rep, abundance) %>%
+  spread(Feature_ID, abundance, fill = 0) %>%
+  column_to_rownames("tre_rep")
+), method = "hellinger"
+) %>%
+  vegan::rda()
+
+eigenvalues <- as.data.frame(pca$CA$eig) %>%
+    rownames_to_column("PC_axes") %>%
+    rename(eigenvalues = "pca$CA$eig") %>%
+    mutate(eigenvalues_variation_explained = (eigenvalues/sum(eigenvalues) * 100))
+
+#Shape legend
+shapes = c(0,1,2,3,4,5,6,7,8)
+
+#Running and plotting PCA
+p1 <- as.data.frame(pca$CA$u) %>%
+  rownames_to_column("tre_rep") %>%
+  inner_join(sample_key %>% mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")), by = "tre_rep") %>%
+  mutate(day = case_when(
+                      timepoint == "T0" ~ "S",
+                      timepoint == "T1" ~ "3",
+                      timepoint == "T2" ~ "6",
+                      timepoint == "T3" ~ "10",
+                      timepoint == "T4" ~ "13",
+                      timepoint == "T5" ~ "17",
+                      timepoint == "T6" ~ "20",
+                      timepoint == "T7" ~ "24",
+                      timepoint == "T8" ~ "27",
+                      TRUE ~ ""
+  )) %>% 
+    mutate(day = fct_relevel(day,
+                             "S","3","6","10","13","17","20","24","27")
+           ) %>% 
+  rename(Treatment = "treatment") %>%
+  ggplot(mapping = aes(x = PC1, y = PC2)) +
+  geom_point(aes(shape = day, colour = Treatment)) +
+   xlab(paste("PC1", round(eigenvalues$eigenvalues_variation_explained[1], digits = 2),"%", sep = " ")) +
+    ylab(paste("PC2", round(eigenvalues$eigenvalues_variation_explained[2], digits = 2),"%", sep = " ")) +
+  coord_cartesian(xlim = c(-0.22, 0.25), ylim= c(-0.25, 0.22)) +
+  scale_colour_manual(values = c("blue","green3","red","yellow4")) +
+   scale_shape_manual("Day", values=shapes) +
+   geom_vline(xintercept = 0, linetype = "dashed", size = 0.5) +
+     geom_hline(yintercept=0, linetype="dashed", size = 0.5) +
+   theme_minimal() +
+     theme(panel.grid = element_blank(),
+           #strip.background = element_blank(),
+        strip.text = element_text(size = TEXT_SIZE, colour = "black"),
+        legend.position = "top",
+        legend.title = element_text(size = TEXT_SIZE, face = "bold", colour = "black"),
+        legend.text = element_markdown(size = TEXT_SIZE, colour = "black"),
+        axis.text = element_text(size = TEXT_SIZE, colour = "black"),
+        axis.title = element_text(size = TEXT_SIZE,colour = "black"
+        )) 
+```
+
+## Family level plot
+```{r}
+top12 <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  inner_join(taxonomy, by = "Feature_ID")  %>%# 869376 rows
+  group_by(family) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  arrange(desc(sum_relab)) %>%
+  slice(1:12) %>%
+  pull(family)
+
+#Arranging the taxa not on abundance but on order-level for the known classes
+family_arranged <- taxonomy %>% 
+  filter(family %in% top12) %>% 
+  distinct(class, family) %>% 
+  filter(!family %in% c("Ambiguous_taxa","Unknown")) %>% 
+  arrange(class) %>%
+  pull(family)
+
+# Removing the uncultured category, so that it ends up in the "other" category later
+top12 = top12[-10] 
+
+#Creating a separate dataframe for Timepoint zero to append, as it is only present in one treatment.
+T0 <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(timepoint, treatment, Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  #mutate(new_phylum = ifelse(grepl("Proteobacteria", phylum), paste0(class, sep = ""), paste0(phylum))) %>%
+  mutate(Group = ifelse(family %in% top12[-9], paste0(family), "Other")) %>%
+  mutate(Group1 = ifelse(family %in% top12[c(-6, -9)], paste0(class, "; ", family), paste0(Group))) %>%
+  group_by(timepoint, treatment, Group1) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  filter(timepoint == "T0")
+
+#All together
+p2 <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(timepoint, treatment, Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  mutate(Group = ifelse(family %in% top12[-9], paste0(family), "Other")) %>%
+  mutate(Group1 = ifelse(family %in% top12[c(-6,-9)], paste0(class, "; ", family), paste0(Group))) %>%
+  group_by(timepoint, treatment, Group1) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","N"))) %>% #Adding timepoint0 to all other treaments
+  rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","T"))) %>%
+  rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","TN"))) %>% #407 rows
+  mutate(day = ifelse(grepl("T0",timepoint),"S",   #Mutating in the day variable and ordering the days as factors
+                ifelse(grepl("T1",timepoint),"3", 
+                ifelse(grepl("T2", timepoint),"6",
+                ifelse(grepl("T3",timepoint),"10",
+                ifelse(grepl("T4",timepoint),"13",
+                ifelse(grepl("T5",timepoint),"17",
+                ifelse(grepl("T6", timepoint),"20",
+                ifelse(grepl("T7", timepoint),"24","27"))))))))) %>%
+  mutate(day = factor(day, levels = c("S","3","6","10","13","17","20","24","27"))) %>%
+  ggplot(mapping = aes(x = day, y =sum_relab, fill = Group1)) +
+  geom_col() +
+  facet_wrap(~ treatment) +
+  theme(axis.text.x = element_text(angle = 60), panel.background = element_blank()) +
+  scale_fill_manual('Family', values = GEOM_COL_COLOURS) +
+  ylab("Relative abundance") +
+  xlab("Day") +
+    theme(panel.grid = element_blank(),
+           #strip.background = element_blank(),
+        strip.text = element_text(size = TEXT_SIZE, colour = "black"),
+        strip.background = element_blank(),
+        legend.title = element_text(size = TEXT_SIZE, face = "bold", colour = "black"),
+        legend.text = element_markdown(size = TEXT_SIZE1, colour = "black"),
+        axis.text = element_text(size = TEXT_SIZE, colour = "black"),
+        axis.title = element_text(size = TEXT_SIZE,colour = "black", face = "bold"),
+        legend.position = "bottom",
+        legend.justification = "left",
+        legend.key.size = unit(0.2, "cm"),
+         plot.margin = unit(c(0.0,0,0,0), "cm")
+        ) +
+ guides(fill=guide_legend(nrow=3, title.position = "top")) 
+
+
+```
+
+# MetaT
+```{r}
+#| label: read_files
+#| warning: false
+#| cache: true
+#Count file for all orfs, tpm is calculated per sample
+#Reading in annotations
+eggnogs <- read_tsv("../data/paper_4_5/eggnog_annotations.tsv.gz")
+
+#Reading in taxonomic annotation of reads
+taxonomy <- read_tsv("../data/paper_4_5/eukulele_phylodb.tsv") %>%
+  select(-species) %>%
+  rename(species = "genus", genus = "family", family = "order", order = "class", class = "phylum", phylum = "kingdom")  %>%
+  mutate_all(function(x) ifelse(str_detect(x, '_X'), NA, x)) %>% #Removing _X-annotations
+  mutate_all(function(x) ifelse(str_detect(x, 'environmental'), NA, x)) %>% # Removing environmental - annotations this is considered the same as NA
+  mutate_all(function(x) ifelse(str_detect(x, 'Misc'), NA, x)) %>%
+  mutate_all(function(x) ifelse(str_detect(x, 'unclassified'), NA, x))
+  
+  
+#Count file for all orfs, tpm is calculated per sample
+bbmap <- fread("../data/paper_4_5/bbmap_counts.tsv.gz", sep = "\t") %>%
+              filter(count > 0)  %>%                               # removing 0 counts to reduce size of table
+              mutate(Geneid = str_replace(Geneid, "[0-9]*_",""),   # Joining in chr and geneid to match format of eggnog naming.
+                     orf = paste(Chr,Geneid, sep = "_"),
+                     sample = str_extract(sample, "P[0-9]*_[0-9]*")) %>% # Removing extra numbers in sample to match sample_ID format
+              dplyr::select(-Geneid,-Chr) %>%
+              dplyr::select(orf,Start,End,Strand,Length,sample,count,tpm) 
+
+#File to connect NGI ID with our own classification ID
+
+sample_ID <- read_tsv("../data/paper_4_5/J.Pinhassi_21_02_sample_info.txt") %>%
+  dplyr::select(1:2) %>%
+  dplyr::rename(sample = 1, sample_name = 2) %>%
+  mutate(sample_name = str_replace(sample_name, "[0-9]*:","")) %>%
+  separate(sample_name, c("treatment","timepoint"), sep = ",") %>%
+  mutate(treatment = gsub("NT","TN", treatment)) %>%
+  mutate(sample_name = paste(timepoint, treatment, sep = "_")) %>%
+  separate(treatment, c("treatment","replicate"), sep = -1) %>%
+  mutate(tre_rep = gsub("_","", sample_name)) %>%
+  mutate(tre_rep = toupper(tre_rep)) %>%
+  mutate(day = case_when( timepoint == "t3" ~ 10,
+                          TRUE ~ 17
+                          )
+         ) %>%
+  as.data.table()
+
+#used to remove some pathways that are covarying due to the same genes present I.e complete nitrification and nitrification. Methane oxidation/ammonia oxidation (showing the same abundances -> meaning that the most simple pathways are expressed).
+removeMods <- c("M00173","M00011","M00804","M00174")
+
+module_legend <- read_tsv("../data/paper_4_5/module_legend.tsv", col_names = c("KEGG_Module","Entry")) %>%
+  filter(!KEGG_Module %in% removeMods) %>%
+  mutate(Entry = sub(",","\n", Entry)) 
+
+pathway_key <- read_tsv("../data/paper_4_5/new_pathways.tsv") %>%
+  rename(KEGG_Pathway = "identifier") %>%
+  rbind(c(KEGG_Pathway = "-", pathway = "No entry"))
+
+mesocosm_variables <- read_tsv("../data/paper_4_5/Mesocosm_Variables.tsv") # Add the µ here
+mesocosm_variables[8, "DOC"] <- 373.9 # Replacing outlier with average value of replicates
+
+mu <- read_tsv("../data/paper_4_5/mu.tsv") %>%
+  select(-Sampling) %>%
+  mutate(Day_of_experiment =case_when( #Corrrecting for wrong day-values
+                      Day_of_experiment == 5 ~ 3,
+                      Day_of_experiment == 8 ~ 6,
+                      Day_of_experiment == 12 ~ 10,
+                      Day_of_experiment == 15 ~ 13,
+                      Day_of_experiment == 19 ~ 17,
+                      Day_of_experiment == 22 ~ 20,
+                      Day_of_experiment == 26 ~ 24,
+                      Day_of_experiment == 29 ~ 27
+                     
+  ))
+
+#Reading in contrast file from edgeR-output
+contrasts <- read_tsv("../data/paper_4_5/edgeR_contrasts.tsv")
+```
+
+```{r}
+#| label: filtering_prokaryotes
+#| cache: true
+#| warning: false
+#Removing non-prokreads as well as recalculating tpm over prok frac.
+bbmap_p <- bbmap %>%
+  semi_join(taxonomy %>% filter(domain %in% c("Bacteria","Archaea")), by = "orf") %>%
+  dplyr::select(-tpm) %>%
+   group_by(sample) %>%
+            mutate(t = count/Length) %>%
+            mutate(tpm = t/sum(t)*1e6) %>%
+   ungroup()
+```
+
+## Introvars
+
+```{r}
+letters <- c("a","b","c","d","e")
+variable <- c("Chlorophyll~a~(µg~dm^{-3})",
+                                      "Dissolved~organic~carbon~(µmol~dm^{-3})",
+                                      "Prokaryotic~abundance~(cells~mL^{-1})~x~10^9",
+                                      "Prokaryotic~production~(cells~mL^{-1}~d^{-1})~x~10^9",
+                                      "Prokaryotic~growth~rate~(µ)")
+
+df <- data.frame(letters, variable)
+
+ mesocosm_variables %>%
+  inner_join(mu, by = c("Day_of_experiment","Treatment", "Replicate")) %>%
+  pivot_longer(cols = 4:10, names_to = "variable", values_to = "value") %>%
+  group_by(Day_of_experiment, Treatment, variable) %>%
+  summarise(mean_value = mean(value), stdev_value = sd(value)) %>%
+  ungroup() %>% 
+  mutate(Treatment = as.character(Treatment)) %>%
+  filter(!variable %in% c("TDP","TDN")) %>%
+  mutate(mean_value = ifelse(grepl("PA|PG", variable), mean_value/10^9, paste0(mean_value)) %>% as.numeric()) %>%
+  mutate(stdev_value = ifelse(grepl("PA|PG", variable), stdev_value/10^9, paste0(stdev_value)) %>% as.numeric()) %>%
+  mutate(variable = factor(variable,
+                           levels = c("Chlorophyll_a","DOC","PA","PG", "mu"),
+                           labels = c("Chlorophyll~a~(µg~dm^{-3})",
+                                      "Dissolved~organic~carbon~(µmol~dm^{-3})",
+                                      "Prokaryotic~abundance~(cells~mL^{-1})~x~10^9",
+                                      "Prokaryotic~production~(cells~mL^{-1}~d^{-1})~x~10^9",
+                                      "Prokaryotic~growth~rate~(µ)"
+                                      )
+                           )) %>%
+  ggplot(mapping = aes(x = Day_of_experiment, y= mean_value, colour = Treatment)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymin = mean_value - stdev_value, ymax = mean_value + stdev_value, width = 0.25)) +
+  facet_wrap(~ variable, scales = "free", 
+             strip.position = "left",
+             labeller = label_parsed
+             ) +
+  geom_text(data = df, aes(x = 3, y = Inf, label = letters, size = 7, fontface = "bold"), colour = "black", show.legend = FALSE) +
+  theme_minimal() +
+  scale_x_continuous(labels = c(3,6,10,13,17,20,24,27),
+                     breaks= c(3,6,10,13,17,20,24,27)) +
+  theme(axis.text.y = element_text(size = 7, colour = "black"),
+        axis.text.x = element_text(size = 7, colour = "black", face = c("plain","plain","bold","plain","bold","plain","plain","plain")),
+        legend.text = element_text(size = 7, colour = "black"),
+        legend.title = element_text(size = 7, colour = "black", face = "bold"),
+        strip.text = element_text(size = 7, colour = "black", face = "bold"),
+        axis.title = element_text(size = 7, colour = "black", face = "bold"),
+        axis.line = element_line(size = 0.3, colour = "black", linetype=1),
+        strip.placement = "outside",
+        panel.grid = element_blank(),
+        legend.position = c(0.85,0.2)
+        ) +
+  xlab("Day of experiment") +
+  ylab("") +
+  scale_colour_manual('Treatment', values = TREAT_COLOURS) +
+   coord_cartesian(clip = "off")
+ggsave("../figures/Paper_IV_V_introVars.png")
+```
+
+```{r}
+ # Doing  PCA on KEGG_ko.
+orf_mat <- fread("../data/paper_4_5/seed_eggNOG_ortholog_orfmat.tsv", sep = "\t") %>%
+  column_to_rownames("sample_name") %>%
+  as.matrix()
+
+orf_mat_hellinger <- decostand(orf_mat, method = "hellinger") # Hellinger transformation
+
+
+PCA <- rda(orf_mat_hellinger) 
+  
+eigenvalues <- as.data.frame(PCA$CA$eig) %>%
+    rownames_to_column("PC_axes") %>%
+    rename(eigenvalues = "PCA$CA$eig") %>%
+    mutate(eigenvalues_variation_explained = (eigenvalues/sum(eigenvalues) * 100))
+
+   
+pca_df <- as.data.frame(PCA$CA$u) %>%
+     rownames_to_column("sample_name") %>%
+     inner_join(sample_ID, by = "sample_name") %>%
+   mutate(Day = case_when(timepoint == "t3" ~ "10",
+                               TRUE ~ "17")) 
+
+#So it is possible to add these symbols in ggplot, finally! Now to incorporate it in the geom_label or text
+   p3 <- pca_df %>%
+     ggplot(mapping = aes(x = PC1, y = PC2, fill = treatment, colour = treatment, shape = Day)) +
+     geom_point() +
+     xlab(paste("PC1", round(eigenvalues$eigenvalues_variation_explained[1], digits = 2),"%", sep = " ")) +
+     ylab(paste("PC2", round(eigenvalues$eigenvalues_variation_explained[2], digits = 2),"%", sep = " ")) +
+     geom_polygon(data = pca_df, aes(fill = treatment, colour = treatment), alpha = 0.3, show.legend = FALSE) +
+     scale_colour_manual('Treatment',values = TREAT_COLOURS) +
+     scale_fill_manual('',values = TREAT_COLOURS) +
+     theme_minimal() +
+     theme(panel.grid = element_blank(),
+           axis.title = element_text(size = TEXT_SIZE, face = "bold"),
+           axis.text.x = element_text(size = TEXT_SIZE, colour = "black"),
+           axis.text.y = element_text(size = TEXT_SIZE, colour = "black"),
+           legend.position = "none",
+           legend.text = element_text(size = TEXT_SIZE),
+           legend.title = element_text(size = TEXT_SIZE, face = "bold")) +
+     geom_vline(xintercept = 0, linetype = "dashed", size = 0.5) +
+     geom_hline(yintercept=0, linetype="dashed", size = 0.5) +
+    scale_shape_manual('Day of experiment', values = c(3, 5)) +
+     guides(fill = FALSE)
+   
+   ###Adding the taxonomy plot
+   #Extracting the most abundant order and higher groups
+top12 <- bbmap_p %>%
+  inner_join(sample_ID, by = "sample") %>%
+  group_by(treatment, timepoint, orf) %>%
+  summarise(tpm = mean(tpm)) %>%
+  ungroup() %>%
+  inner_join(taxonomy %>% filter(domain %in% c("Bacteria", "Archaea")), 
+            by = "orf") %>%
+  mutate(order_coa = coalesce(order, class, phylum)) %>%
+  group_by(order_coa) %>%
+  summarise(tpm = sum(tpm)) %>%
+  ungroup() %>%
+  arrange(desc(tpm)) %>%
+  slice(1:12) %>%
+  pull(order_coa)
+ 
+#Adding one more colour to the scale
+GEOM_COL_COLOURS1 = c(GEOM_COL_COLOURS, "#D3D3D3")
+
+f_labels <- data.frame(treatment = c("C"), label = c("a"))
+ 
+p4 <- bbmap_p %>%
+  inner_join(sample_ID, by = "sample") %>%
+  dplyr::select(-tpm) %>%
+  group_by(treatment,timepoint) %>%
+            mutate(t = count/Length) %>%
+            mutate(tpm = t/sum(t)*1e6) %>%
+            ungroup() %>%
+  inner_join(taxonomy %>% filter(domain %in% c("Bacteria","Archaea")), by = "orf") %>%
+  mutate(order_coa = coalesce(order, class, phylum)) %>%
+  mutate(Group = ifelse(order_coa %in% top12, paste0(order_coa), "Other")) %>%
+  group_by(treatment, timepoint, Group) %>% #Summarising mean tpm per timepoint and treatment per group
+  summarise(tpm = sum(tpm)) %>%
+  ungroup() %>%
+  mutate(Group = fct_recode(Group, P_Thaumarchaeota = "Thaumarchaeota", C_Gammaproteobacteria = "Gammaproteobacteria")) %>%
+   mutate(Day = case_when(timepoint == "t3" ~ "10",
+                               TRUE ~ "17")) %>%
+  ggplot(mapping = aes(x= Day, y = tpm/1000, fill = fct_relevel(Group, "Other", after = 12))) +
+  geom_col() +
+  facet_wrap(~ treatment) +
+  theme(axis.title = element_text(size = TEXT_SIZE, face = "bold"),
+        axis.text.x = element_text(size = TEXT_SIZE, colour = "black", face = "bold"),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom",
+        legend.justification = "left",
+        strip.background = element_blank(),
+        panel.background = element_blank(), 
+        strip.text = element_text(size = TEXT_SIZE),
+        axis.text.y = element_text(size = TEXT_SIZE, colour = "black"),
+        legend.text = element_text(size = TEXT_SIZE1),
+        legend.title = element_text(size = TEXT_SIZE, face = "bold", colour = "black"),
+        legend.key.size = unit(0.2, "cm"),
+        plot.margin = unit(c(0.0,0,0,0), "cm")
+        ) +
+  scale_fill_manual('Taxonomy', values = GEOM_COL_COLOURS1) +
+  ylab("Transcripts per million x 1000") +
+  xlab("Day") +
+  guides(fill=guide_legend(nrow=3, title.position = "top")) 
+  
+
+p4
+```
+
+```{r}
+p1  + p2  + p3 + p4 + plot_layout(widths = c(1, 2)) +
+   plot_annotation(tag_levels = 'a') &
+  theme(axis.title = element_text(size = TEXT_SIZE1),
+        axis.text = element_text(size = TEXT_SIZE1, colour = "black"),
+        #legend.text = element_text(size = TEXT_SIZE),
+        legend.title = element_text(size = TEXT_SIZE1, face = "bold", colour = "black")
+        )
+
+prow1 <- plot_grid(p1 + p2 + theme(legend.position = "none")) 
+
+prow2 <- plot_grid(p3 + p4 + theme(legend.position = "none")) 
+
+legend_b <- get_legend(p2 + theme(legend.position = "bottom"))
+
+legend_d <- get_legend(p4 + theme(legend.position = "bottom"))
+
+layout <- c('
+AAA
+AAA
+AAA
+AAA
+BBB
+CCC
+CCC
+CCC
+CCC
+DDD
+')
+ prow1 + legend_b + prow2 +  legend_d + plot_layout(design = layout) 
+   
+
+ 
+ 
+
+ggsave("../figures/Paper_IV_V_pca_tax.png", width = 25, height = 29, units = "cm")
+
+```
+

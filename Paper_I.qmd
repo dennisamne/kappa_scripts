@@ -1,0 +1,278 @@
+---
+title: "Paper_I"
+author: "Dennis Amnebrink"
+affiliation-title: "Linnaeus University"
+title-block-banner: true
+date: now
+editor: visual
+toc: true
+prefer-html: true
+number-sections: true
+format:
+  html:
+     code-fold: true
+     self-contained: true
+---
+
+```{r libraries}
+library(cluster)
+library(pheatmap)
+library("PoiClaClu")
+library(tidyverse)
+library(lubridate)
+library(ape)
+library(vegan)
+library(cowplot)
+library(feather)
+library(ggConvexHull) 
+library(viridis)
+library(rain) 
+library(Hmisc)
+library(RColorBrewer)
+library(patchwork)
+library(ggplotify)
+library(ggrepel)
+```
+
+```{r colours}
+GEOM_COL_COLOURS = c(
+  RColorBrewer::brewer.pal(12, name = 'Paired'))
+
+readRenviron("../global_vars.R")
+  
+TEXT_SIZE <- Sys.getenv("TEXT_SIZE")
+
+```
+
+```{r file_loading}
+# Loading annotation file
+  eggnog_names <- c("Geneid", "MAG", "contig", "Start", "End", "Strand", "Length", "seed_eggNOG_ortholog", "seed_ortholog_evalue", "seed_ortholog_score", "Predicted_taxonomic_group", "Predicted_protein_name", "Gene_Ontology_terms", "EC_number", "KEGG_ko", "KEGG_Pathway", "KEGG_Module", "KEGG_Reaction", "KEGG_rclass", "BRITE", "KEGG_TC", "CAZy", "BiGG Reaction", "tax_scope:eggNOG_taxonomic_level_used_for_annotation", "eggNOG_OGs", "bestOG", "COG_Functional_Category", "eggNOG_free_text_description", "sample", "counts")
+  
+  eggnog_table <- read_tsv("../data/paper_1/eggnog_table_long.tsv.gz", col_types = cols(Start = col_integer(), End = col_integer(), Length = col_integer(), counts = col_integer(), X7 = col_character())) %>%
+                             separate(Chr, c("MAG", "contig"), sep ="_k", remove = TRUE)
+  eggnog_table$sample <- sub('.non_rRNA.pe.bowtie2.q5', '', eggnog_table$sample)
+   eggnog_table$sample <- sub('.ca.pesickle.pe.bowtie2.sorted.unmappedpairs.pe.bowtie2.q5', '', eggnog_table$sample) 
+   eggnog_table$sample <- sub('.lane00[0-9].ca.pesickle.pe.bowtie2.q5', '', eggnog_table$sample) 
+   eggnog_table$sample <- sub("^", "P", eggnog_table$sample)
+   eggnog_table$sample <- sub("PP", "P", eggnog_table$sample)
+   eggnog_table$sample <- sub(".sorted.bam", "", eggnog_table$sample)
+   
+   colnames(eggnog_table) <- eggnog_names
+   
+   # Loading date file/sample key
+   lmo_id_date <- read_tsv("../data/paper_1/lmo_id_date.tsv.gz") %>%
+    dplyr::select("Sample", 2) %>% 
+    dplyr::rename(dates=2) %>%
+    dplyr::rename(sample="Sample") %>%
+    mutate(season = ifelse(grepl("201[0-9]-0[3-5]-", dates), "spring",
+                           ifelse(grepl("201[0-9]-0[6-8]-", dates), "summer",
+                                  ifelse(grepl("201[0-9]-09-|201[0-9]-10-|201[0-9]-11-", dates), "autumn", "winter")))) %>%
+    mutate(filter_frac = ifelse(grepl("201[2-5]", dates), "filtered", "unfiltered")) %>%
+    mutate(year = str_extract(dates, "[0-9][0-9][0-9][0-9]"))
+  lmo_id_date$sample <- sub('P12052_1', 'P12052_3', lmo_id_date$sample) 
+  
+  #Taxonomy file
+  BACL_taxonomy <- read_tsv("../data/paper_1/BACL_identities.tsv.gz") %>%
+    separate("Taxonomy", c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep = ";[a-z]__", remove = T) %>%
+    mutate(location = ifelse(grepl("*P2236*",MAG ), "redox",
+                             ifelse(grepl("*P1994*", MAG), "transect",
+                                    ifelse(grepl("*SRR*", MAG), "askö", "LMO"))))
+  
+  # Orf-file
+  cds_table<- read_tsv("../data/paper_1/cds_counts_filtered.tsv")
+  
+  
+  # Metadata
+  lmo_fc <- read_tsv("../data/paper_1/LMO_FC_2016_17.tsv.gz", col_types = cols(.default = col_number(), Date =col_datetime(), Replicate = col_character(), FCS_file = col_character())) %>%
+  rename(cells_mL = "cells/mL") %>%
+  rename(dates ="Date")
+
+lmo_fc_average <- lmo_fc %>%
+  group_by(dates) %>%
+  summarise(mean_cells_mL = mean(cells_mL)) %>%
+  ungroup()
+
+lmo_metadata <- read_tsv("../data/paper_1/LMO_metadata1.tsv.gz", col_types = cols(.default = col_number(), Chla_Average = col_number(), Date = col_datetime())) %>% subset(Date > "2016-01-01" & Date < "2017-12-31") %>%
+  rename(dates = "Date")
+
+lmo_metadata_fc <- lmo_metadata %>%
+  left_join(lmo_fc_average, by = "dates") %>%
+  gather(variable, value, 3:37, na.rm = TRUE)
+
+lmo_metadata_fc$dates <- as.Date(lmo_metadata_fc$dates)
+
+
+  
+
+```
+
+# nMDS
+
+```{r}
+TEXT_SIZE = 11
+mag.wide <- cds_table %>% 
+  inner_join(lmo_id_date, by = "sample") %>%
+  filter(filter_frac == "unfiltered") %>%
+  group_by(dates) %>%
+  mutate(t = counts/Length) %>%
+  mutate(tpm = t/sum(t)*1e6) %>%
+  ungroup() %>%
+  select(-t) %>%
+  group_by(MAG, dates) %>%
+  summarise(tpm = sum(tpm)) %>%
+  ungroup() %>%
+  select(MAG, dates, tpm) %>%
+  spread(MAG, tpm, fill = 0) %>%
+  remove_rownames() %>%
+  column_to_rownames(var="dates")
+
+#Transform the tpm
+mag.wide.hellinger <- decostand(mag.wide, method = "hellinger")
+
+#Do the meta nmds, stress = 0.05
+meta.nmds.mag <- metaMDS(mag.wide.hellinger, k=2, trymax = 50, autotransform = T, trace = FALSE)
+meta.nmds.mag
+
+#Dataset prepared so that the expression can be divided into seasons
+lmo_date_prep <- lmo_id_date %>% filter(filter_frac == "unfiltered") %>% distinct(dates, .keep_all = T) %>% inner_join(lmo_metadata_fc, by = "dates") %>%
+  spread(variable,value) %>% arrange(dates)
+
+attach(lmo_date_prep)
+
+
+ 
+ 
+ nmds_df <- as.data.frame(meta.nmds.mag$points) %>%
+                        rownames_to_column("dates") 
+                        
+nmds_df$dates <- as.Date(nmds_df$dates)  
+
+lmo_id_date$dates <- gsub("^[0-9][0-9]","", lmo_id_date$dates)
+lmo_id_date$dates <- as.character(lmo_id_date$dates)
+  
+nmds_df$dates <- gsub("^[0-9][0-9]","", nmds_df$dates)
+nmds_df$dates <- as.character(nmds_df$dates)  
+
+lmo_date_prep$dates <- gsub("^[0-9][0-9]","", lmo_date_prep$dates)
+lmo_date_prep$dates <- as.character(lmo_date_prep$dates)
+
+
+p1 <- nmds_df %>% inner_join(lmo_id_date %>% select(-sample) %>% distinct(dates, .keep_all = T), by = "dates")  %>%  
+  inner_join(lmo_date_prep %>% select(dates, Temperature_C), by = "dates") %>%
+  ggplot(mapping = aes(x = MDS1, y = MDS2)) +
+  geom_point(aes(colour = Temperature_C, shape = year)) +
+  scale_colour_viridis() +
+  geom_convexhull(data=nmds_df %>% inner_join(lmo_id_date, by = "dates"), aes(x=MDS1, y=MDS2, group=season, fill = season), alpha=0.2) +
+  geom_text_repel(data = nmds_df, mapping = aes(x = MDS1, y = MDS2, label = dates), size = 4) +
+  scale_fill_manual(values = GEOM_COL_COLOURS[c(7,3,6,2)]) +
+  xlab("NMDS 1") +
+  ylab("NMDS 2") +
+  theme_classic() +
+  theme(panel.border = element_blank(),
+        legend.title = element_text(size = TEXT_SIZE, face = "bold"),
+        axis.text = element_text(size = TEXT_SIZE),
+        axis.title = element_text(size = TEXT_SIZE),
+        legend.text = element_text(size = TEXT_SIZE),
+        legend.box.spacing = unit(-0.5, "mm")) +
+  geom_text(x =-0.38, y = -0.5, label = paste0("stress =",round(meta.nmds.mag$stress,2)), size = 4)  +
+  labs(color = "Temperature", shape = "Year") +
+  coord_cartesian(clip = "off") +
+ # theme(legend.title = element_text(size = 9), legend.text = element_text(size = 8),
+  #      ) +
+  guides(scale = "none", fill = "none")
+
+p1
+
+```
+
+# Transcriptional wave
+
+```{r}
+man_mag_order<- rev(c("P1994_108_bin102", "P6071_508_bin152", "SRR3727512_bin105","P4201_103_bin59", "P4201_116_bin52", "P4201_116_bin63","P1994_127_bin76","P1994_124_bin41","P6071_514_bin160","P6071_511_bin51", "P6071_526_bin59", "P4201_102_bin135", "P6071_517_bin195","SRR3727508_bin38",  "P6071_502_bin182", "P1994_121_bin104","P1994_121_bin230","P4201_101_bin152", "P4201_120_bin54", "P4201_103_bin31", "P2236_112_bin168", "P1994_122_bin236", "SRR3727505_bin154", "P4201_119_bin37", "P6071_532_bin163", "P1994_119_bin73", "P1994_122_bin109", "P4201_120_bin71", "P6071_514_bin159","P6071_511_bin252", "P4201_124_bin70", "P4201_106_bin4", "SRR3727521_bin101", "SRR3727512_bin93", "P1994_116_bin178", "P4201_120_bin144", "SRR3727525_bin46", "SRR3727503_bin31", "P4201_123_bin26", "P1994_106_bin43", "P6071_511_bin177", "SRR3727517_bin7", "P4201_112_bin101", "P4201_114_bin172", "P2236_102_bin110", "P1994_107_bin119", "P1994_129_bin89", "P4201_105_bin178","P6071_516_bin75","P6071_511_bin140"))
+```
+
+```{r}
+# The vector with top50 MAGs
+top50_mags <- cds_table %>%
+  inner_join(lmo_id_date, by ="sample") %>%
+  filter(filter_frac == "unfiltered") %>%
+  group_by(dates) %>%
+  mutate(t = counts/Length) %>%
+  mutate(tpm = t/sum(t)*1e6) %>%
+  ungroup() %>%
+  select(-t) %>%
+  group_by(MAG) %>%
+  summarise(sum_tpm = sum(tpm)) %>%
+  ungroup() %>%
+  filter(MAG != c("P1994_125_bin49","P6071_505_bin209")) %>% #Excluding the similar MAGs
+  arrange(desc(sum_tpm)) %>%
+  mutate( 
+    medsort_MAG = factor(MAG) %>% forcats::fct_reorder(sum_tpm, .desc = FALSE)) %>%
+      slice(1:50) %>%
+  .$MAG
+
+top50_df <- cds_table %>%
+  inner_join(lmo_id_date, by ="sample") %>%
+  filter(filter_frac == "unfiltered") %>%
+  group_by(dates) %>%
+  mutate(t = counts/Length) %>%
+  mutate(tpm = t/sum(t)*1e6) %>%
+  ungroup() %>%
+  select(-t) %>%
+  filter(MAG %in% top50_mags) %>%
+  group_by(MAG, dates) %>%
+  summarise(tpm = sum(tpm)) %>%
+  ungroup() %>%
+  inner_join(BACL_taxonomy %>% select(MAG, BACL), by = "MAG") %>%
+  select(-MAG) %>%
+  spread(BACL, tpm, fill = 0) %>%
+  column_to_rownames("dates")
+
+ann_row <- top50_df %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("BACL") %>%
+  inner_join(BACL_taxonomy, by = "BACL") %>%
+  select(BACL, Phylum) %>%
+  column_to_rownames("BACL") %>%
+  replace(is.na(.),"unclassified") 
+
+ann_col <- top50_df %>%
+  as.data.frame() %>%
+  rownames_to_column("dates") %>%
+  inner_join(lmo_id_date, by = "dates") %>%
+  distinct(dates, season) %>%
+  column_to_rownames("dates") %>%
+  rename(Season = "season")
+
+# For legends and colours in the pheatmap
+Var1 = GEOM_COL_COLOURS[c(7,3,6,2)]
+names(Var1) = c("summer","winter","spring","autumn")
+Var2 = brewer.pal(11, "Paired")
+names(Var2) = c(paste0(unique(ann_row$Phylum)))
+annCol = list(Season = Var1[c(3,1,4,2)], Phylum = Var2) # Placing the legend order and coloring
+
+
+obj <- BACL_taxonomy %>%
+  select(MAG, BACL) %>%
+  filter(MAG %in% man_mag_order) %>%
+  column_to_rownames("MAG") 
+  
+ bacl_order <- obj[man_mag_order,] 
+ 
+ TEXT_SIZE = 10
+p2 <- pheatmap(t(top50_df[,rev(bacl_order)]), cluster_cols = F, cluster_rows = F, scale = "row",  border_color = NA, fontsize_row = as.numeric(TEXT_SIZE), fontsize_col = as.numeric(TEXT_SIZE), annotation_col = rev(ann_col), annotation_row = ann_row,  annotation_names_row = F, annotation_names_col = F, annotation_colors = annCol, fontsize = as.numeric(TEXT_SIZE), cellheight = 7, cellwidth = 7)
+```
+
+```{r}
+p1 + as.ggplot(p2) +
+   plot_layout(ncol = 1, heights = c(1, 2)) +
+  plot_annotation(tag_levels = 'a')
+
+ggsave("../figures/Paper_1_NMDS_pheatmap.png", height = 24, width = 18, units = "cm") 
+```
+
+```{r}
+
+```
+
